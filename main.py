@@ -13,7 +13,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 COMMON_PORTS = {21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS", 80: "HTTP", 443: "HTTPS", 110: "POP3", 143: "IMAP", 445: "SMB", 3306: "MySQL", 3389: "RDP", 8080: "HTTP-Proxy", 8443: "HTTPS-Alt"}
 
-# SENİN YENİ WHOISXML API KEY'İN EKLENDİ
 API_KEYS = {
     "VIRUSTOTAL": "c8ccd5cf50b35e7fe37f201d78af83d3b070b5d982897cacc55bb96bac858576", 
     "CENSYS_ID": None, 
@@ -63,12 +62,13 @@ def full_scan(target: str):
         "advanced": {"vt_malicious": 0, "ssl_issuer": "", "ssl_warning": ""},
         "siblings": [], "ports": [], "cloudflare": {"is_cf": False, "origin_ips": [], "xmlrpc": False, "favicon": ""},
         "subdomains": [], "files": {"admin": [], "sensitive": []},
+        "technologies": [], # YENİ: Teknoloji Dedektörü
         "risk": {"score": 100, "grade": ""}
     }
 
     if not res["ip"]: return res
 
-    # 1. TEMEL BİLGİ & YAŞ (ÖNCE WHOISXML API KULLANILIYOR)
+    # 1. TEMEL BİLGİ & YAŞ
     try:
         wx_url = f"https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey={API_KEYS['WHOISXML']}&domainName={target}&outputFormat=JSON"
         wx_req = requests.get(wx_url, timeout=5).json()
@@ -88,7 +88,6 @@ def full_scan(target: str):
                 elif age_days < 90: res["risk"]["score"] -= 20
     except: pass
 
-    # WhoisXML Hata Verirse Senin Orijinal Kodun Devreye Girer (Bozulmaz)
     if not res["basic"]["registrar"]:
         try:
             w = whois.whois(target)
@@ -103,7 +102,7 @@ def full_scan(target: str):
                 elif age_days < 90: res["risk"]["score"] -= 20
         except: pass
 
-    # 2. GeoIP ve Cloudflare Tespiti
+    # 2. GeoIP
     try:
         g = requests.get(f"http://ip-api.com/json/{res['ip']}", headers=HEADERS, timeout=5).json()
         if g.get('status') == 'success':
@@ -111,6 +110,26 @@ def full_scan(target: str):
             if any(s.lower() in str(res["geo"]["org"]).lower() for s in SUSPICIOUS_PROVIDERS): res["risk"]["score"] -= 10
             if "cloudflare" in str(res["geo"]["org"]).lower():
                 res["cloudflare"]["is_cf"] = True
+    except: pass
+
+    # YENİ: TEKNOLOJİ DEDEKTÖRÜ (WAPPALYZER MANTIĞI)
+    try:
+        techs = set()
+        r_tech = requests.get(f"http://{target}", headers=HEADERS, timeout=5, verify=False)
+        server = r_tech.headers.get("Server")
+        xpow = r_tech.headers.get("X-Powered-By")
+        if server: techs.add(f"Sunucu: {server}")
+        if xpow: techs.add(f"Altyapı: {xpow}")
+        
+        html_lower = r_tech.text.lower()
+        if "wp-content" in html_lower or "wordpress" in html_lower: techs.add("CMS: WordPress")
+        if "joomla" in html_lower: techs.add("CMS: Joomla")
+        if "id=\"root\"" in html_lower or "id=\"__next\"" in html_lower or "react" in html_lower: techs.add("Frontend: React/Next.js")
+        if "vue" in html_lower: techs.add("Frontend: Vue.js")
+        if "laravel" in html_lower: techs.add("Framework: Laravel")
+        if "php" in html_lower or ".php" in html_lower: techs.add("Dil: PHP")
+        
+        res["technologies"] = list(techs)
     except: pass
 
     # 3. DNS & MX Leak 
@@ -125,7 +144,7 @@ def full_scan(target: str):
                         res["cloudflare"]["origin_ips"].append(f"MX Sızıntısı: {mx_ip} ({mx_host})")
     except: pass
 
-    # 4. Gelişmiş VT Analizi, SSL ve Kardeş Domainler
+    # 4. Gelişmiş VT Analizi
     if API_KEYS["VIRUSTOTAL"]:
         vt_headers = {"x-apikey": API_KEYS["VIRUSTOTAL"], "User-Agent": "Mozilla/5.0"}
         try:
@@ -160,7 +179,7 @@ def full_scan(target: str):
             res["cloudflare"]["favicon"] = str(mmh3.hash(codecs.encode(f_req.content, "base64")))
     except: pass
 
-    # 6. Çoklu İşlem ile Ağır Taramalar
+    # 6. Çoklu İşlem
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as exe:
         f_ports = [exe.submit(check_port, res["ip"], p, s) for p, s in COMMON_PORTS.items()]
         subs = set()
