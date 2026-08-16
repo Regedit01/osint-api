@@ -12,7 +12,15 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 COMMON_PORTS = {21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS", 80: "HTTP", 443: "HTTPS", 110: "POP3", 143: "IMAP", 445: "SMB", 3306: "MySQL", 3389: "RDP", 8080: "HTTP-Proxy", 8443: "HTTPS-Alt"}
-API_KEYS = {"VIRUSTOTAL": "c8ccd5cf50b35e7fe37f201d78af83d3b070b5d982897cacc55bb96bac858576", "CENSYS_ID": None, "CENSYS_SECRET": None}
+
+# SENİN YENİ WHOISXML API KEY'İN EKLENDİ
+API_KEYS = {
+    "VIRUSTOTAL": "c8ccd5cf50b35e7fe37f201d78af83d3b070b5d982897cacc55bb96bac858576", 
+    "CENSYS_ID": None, 
+    "CENSYS_SECRET": None,
+    "WHOISXML": "at_DkEBslHOT711lQ8Z9mgT8oXSrId8n" 
+}
+
 SUSPICIOUS_PROVIDERS = ["1337 Services", "Offshore", "Bulletproof", "Njalla", "Privacy", "Panama"]
 SUSPICIOUS_TLDS = [".cfd", ".xyz", ".top", ".gq", ".ml", ".tk", ".cn"]
 
@@ -51,7 +59,7 @@ def full_scan(target: str):
     if not target: raise HTTPException(status_code=400, detail="Hedef girilmedi")
 
     res = {
-        "target": target, "ip": resolve_ip(target), "basic": {}, "dns": {}, "geo": {},
+        "target": target, "ip": resolve_ip(target), "basic": {"registrar": "", "org": "", "creation_date": "", "age_days": 9999, "expires": "", "contact_email": ""}, "dns": {}, "geo": {},
         "advanced": {"vt_malicious": 0, "ssl_issuer": "", "ssl_warning": ""},
         "siblings": [], "ports": [], "cloudflare": {"is_cf": False, "origin_ips": [], "xmlrpc": False, "favicon": ""},
         "subdomains": [], "files": {"admin": [], "sensitive": []},
@@ -60,19 +68,40 @@ def full_scan(target: str):
 
     if not res["ip"]: return res
 
-    # 1. Temel Bilgi & Yaş (Senin Whois Mantığı)
+    # 1. TEMEL BİLGİ & YAŞ (ÖNCE WHOISXML API KULLANILIYOR)
     try:
-        w = whois.whois(target)
-        c_date = w.creation_date[0] if isinstance(w.creation_date, list) else w.creation_date
-        res["basic"]["registrar"] = str(w.registrar)
-        res["basic"]["org"] = str(w.org)
-        if c_date:
-            res["basic"]["creation_date"] = str(c_date)
-            age_days = (datetime.now() - c_date.replace(tzinfo=None)).days if hasattr(c_date, 'tzinfo') else (datetime.now() - c_date).days
-            res["basic"]["age_days"] = age_days
-            if age_days < 30: res["risk"]["score"] -= 40
-            elif age_days < 90: res["risk"]["score"] -= 20
-    except: res["basic"]["age_days"] = 9999
+        wx_url = f"https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey={API_KEYS['WHOISXML']}&domainName={target}&outputFormat=JSON"
+        wx_req = requests.get(wx_url, timeout=5).json()
+        if "WhoisRecord" in wx_req:
+            w_rec = wx_req["WhoisRecord"]
+            res["basic"]["registrar"] = w_rec.get("registrarName", "")
+            res["basic"]["expires"] = w_rec.get("expiresDate", "")
+            res["basic"]["contact_email"] = w_rec.get("contactEmail", "")
+            
+            c_date_str = w_rec.get("createdDate", "")
+            if c_date_str:
+                res["basic"]["creation_date"] = c_date_str
+                c_date_obj = datetime.strptime(c_date_str.split('T')[0], "%Y-%m-%d")
+                age_days = (datetime.now() - c_date_obj).days
+                res["basic"]["age_days"] = age_days
+                if age_days < 30: res["risk"]["score"] -= 40
+                elif age_days < 90: res["risk"]["score"] -= 20
+    except: pass
+
+    # WhoisXML Hata Verirse Senin Orijinal Kodun Devreye Girer (Bozulmaz)
+    if not res["basic"]["registrar"]:
+        try:
+            w = whois.whois(target)
+            c_date = w.creation_date[0] if isinstance(w.creation_date, list) else w.creation_date
+            res["basic"]["registrar"] = str(w.registrar)
+            res["basic"]["org"] = str(w.org)
+            if c_date:
+                res["basic"]["creation_date"] = str(c_date)
+                age_days = (datetime.now() - c_date.replace(tzinfo=None)).days if hasattr(c_date, 'tzinfo') else (datetime.now() - c_date).days
+                res["basic"]["age_days"] = age_days
+                if age_days < 30: res["risk"]["score"] -= 40
+                elif age_days < 90: res["risk"]["score"] -= 20
+        except: pass
 
     # 2. GeoIP ve Cloudflare Tespiti
     try:
@@ -84,7 +113,7 @@ def full_scan(target: str):
                 res["cloudflare"]["is_cf"] = True
     except: pass
 
-    # 3. DNS & MX Leak (Senin DNSBil/DB-IP Mantığın)
+    # 3. DNS & MX Leak 
     try:
         for rtype in ['A', 'NS', 'MX', 'TXT']:
             res["dns"][rtype] = [str(a) for a in dns.resolver.resolve(target, rtype)]
@@ -118,7 +147,7 @@ def full_scan(target: str):
             if sus_count > 0: res["risk"]["score"] -= 15
         except: pass
 
-    # 5. XML-RPC ve Favicon (Senin CloudflareDetector Sınıfın)
+    # 5. XML-RPC ve Favicon 
     try:
         x_req = requests.get(f"http://{target}/xmlrpc.php", headers=HEADERS, timeout=3, verify=False)
         if x_req.status_code in [405, 200] and "XML-RPC server accepts POST" in x_req.text:
@@ -131,11 +160,9 @@ def full_scan(target: str):
             res["cloudflare"]["favicon"] = str(mmh3.hash(codecs.encode(f_req.content, "base64")))
     except: pass
 
-    # 6. Çoklu İşlem ile Ağır Taramalar (Portlar, Subdomain, Hassas Dosya)
+    # 6. Çoklu İşlem ile Ağır Taramalar
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as exe:
-        # Portlar
         f_ports = [exe.submit(check_port, res["ip"], p, s) for p, s in COMMON_PORTS.items()]
-        # Subdomainler (crt.sh & hackertarget)
         subs = set()
         def get_ht():
             try: return [l.split(',')[0] for l in requests.get(f"https://api.hackertarget.com/hostsearch/?q={target}", timeout=5).text.split('\n') if target in l]
@@ -146,7 +173,6 @@ def full_scan(target: str):
         f_ht = exe.submit(get_ht)
         f_crt = exe.submit(get_crt)
 
-        # Admin & Dosyalar
         admin_paths = ["admin", "administrator", "panel", "yonetim", "giris", "login", "wp-admin", "cpanel"]
         sensitive_files = [".env", "config.php", "backup.sql", "database.sql", "admin.rar", "site.zip", ".git/HEAD"]
         f_admins = [exe.submit(check_url, f"http://{target}/{p}/", "admin") for p in admin_paths]
