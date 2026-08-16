@@ -62,7 +62,7 @@ def full_scan(target: str):
         "advanced": {"vt_malicious": 0, "ssl_issuer": "", "ssl_warning": ""},
         "siblings": [], "ports": [], "cloudflare": {"is_cf": False, "origin_ips": [], "xmlrpc": False, "favicon": ""},
         "subdomains": [], "files": {"admin": [], "sensitive": []},
-        "technologies": [], # YENİ: Teknoloji Dedektörü
+        "technologies": [], 
         "risk": {"score": 100, "grade": ""}
     }
 
@@ -112,27 +112,44 @@ def full_scan(target: str):
                 res["cloudflare"]["is_cf"] = True
     except: pass
 
-    # YENİ: TEKNOLOJİ DEDEKTÖRÜ (WAPPALYZER MANTIĞI)
+    # 3. YENİ: GÜÇLENDİRİLMİŞ TEKNOLOJİ DEDEKTÖRÜ
     try:
         techs = set()
         r_tech = requests.get(f"http://{target}", headers=HEADERS, timeout=5, verify=False)
+        
+        # Sunucu başlıkları
         server = r_tech.headers.get("Server")
         xpow = r_tech.headers.get("X-Powered-By")
         if server: techs.add(f"Sunucu: {server}")
         if xpow: techs.add(f"Altyapı: {xpow}")
         
+        # Meta veriler ve HTML içi kontroller
         html_lower = r_tech.text.lower()
-        if "wp-content" in html_lower or "wordpress" in html_lower: techs.add("CMS: WordPress")
+        soup = BeautifulSoup(r_tech.text, 'html.parser')
+        gen = soup.find('meta', attrs={'name': 'generator'})
+        if gen and gen.get('content'):
+            techs.add(f"CMS/Altyapı: {gen.get('content')}")
+            
+        # Çerez (Cookie) kontrolleri
+        for c in r_tech.cookies.get_dict():
+            if 'wp-' in c or 'wordpress' in c: techs.add("CMS: WordPress")
+            if 'PHPSESSID' in c: techs.add("Dil: PHP")
+            
+        # Kaynak kod (Source) kontrolleri
+        if "wp-content" in html_lower or "wp-includes" in html_lower: techs.add("CMS: WordPress")
         if "joomla" in html_lower: techs.add("CMS: Joomla")
+        if "shopify" in html_lower: techs.add("E-Ticaret: Shopify")
         if "id=\"root\"" in html_lower or "id=\"__next\"" in html_lower or "react" in html_lower: techs.add("Frontend: React/Next.js")
-        if "vue" in html_lower: techs.add("Frontend: Vue.js")
+        if "vue" in html_lower or "data-v-" in html_lower: techs.add("Frontend: Vue.js")
         if "laravel" in html_lower: techs.add("Framework: Laravel")
-        if "php" in html_lower or ".php" in html_lower: techs.add("Dil: PHP")
+        if "bootstrap" in html_lower: techs.add("CSS: Bootstrap")
+        if "jquery" in html_lower: techs.add("JS: jQuery")
+        if "cloudflare" in html_lower: techs.add("CDN: Cloudflare")
         
         res["technologies"] = list(techs)
     except: pass
 
-    # 3. DNS & MX Leak 
+    # 4. DNS & MX Leak 
     try:
         for rtype in ['A', 'NS', 'MX', 'TXT']:
             res["dns"][rtype] = [str(a) for a in dns.resolver.resolve(target, rtype)]
@@ -144,7 +161,7 @@ def full_scan(target: str):
                         res["cloudflare"]["origin_ips"].append(f"MX Sızıntısı: {mx_ip} ({mx_host})")
     except: pass
 
-    # 4. Gelişmiş VT Analizi
+    # 5. Gelişmiş VT Analizi
     if API_KEYS["VIRUSTOTAL"]:
         vt_headers = {"x-apikey": API_KEYS["VIRUSTOTAL"], "User-Agent": "Mozilla/5.0"}
         try:
@@ -166,7 +183,7 @@ def full_scan(target: str):
             if sus_count > 0: res["risk"]["score"] -= 15
         except: pass
 
-    # 5. XML-RPC ve Favicon 
+    # 6. XML-RPC ve Favicon 
     try:
         x_req = requests.get(f"http://{target}/xmlrpc.php", headers=HEADERS, timeout=3, verify=False)
         if x_req.status_code in [405, 200] and "XML-RPC server accepts POST" in x_req.text:
@@ -179,7 +196,7 @@ def full_scan(target: str):
             res["cloudflare"]["favicon"] = str(mmh3.hash(codecs.encode(f_req.content, "base64")))
     except: pass
 
-    # 6. Çoklu İşlem
+    # 7. Çoklu İşlem
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as exe:
         f_ports = [exe.submit(check_port, res["ip"], p, s) for p, s in COMMON_PORTS.items()]
         subs = set()
