@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+requests
+python-whois
+dnspython
+beautifulsoup4
+mmh3
+urllib3
